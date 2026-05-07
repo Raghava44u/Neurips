@@ -1,43 +1,60 @@
-# MemEIC
+# adversal2k
 
-MemEIC is a vision-language knowledge editing framework for continual and compositional editing. This repository contains the evaluation code, model configuration files, checkpoints layout, and benchmark assets used to run MemEIC on both the original CCKEB benchmark and a numeric adversarial benchmark built for stable image-grounded answers.
+`adversal2k` is a numeric image-question benchmark for stable multimodal testing. The dataset rewrites open-ended scene questions into count-based questions with integer answers so the same image can be queried more consistently across repeated runs.
 
-This version of the repository is centered on dataset-driven evaluation. The main addition is a numeric adversarial benchmark in which each example is rewritten as a counting question with an integer ground truth, so repeated prompts against the same image are less likely to drift semantically.
+This repository contains the dataset, image files, evaluation code, model configuration files, and checkpoint layout used to test the benchmark.
 
-## What This Repository Contains
+## Main idea
 
-- MemEIC evaluation code in `easyeditor/`
-- MemEIC evaluation entrypoint in `test_compositional_edit.py`
-- hyperparameter files in `hparams/`
-- MemEIC checkpoints under `checkpoints/`
-- the numeric adversarial benchmark in `adversal2k.json`
-- image assets in `coco images/` and `CCKEB_images/`
+The dataset is built for cases where free-form answers are too unstable. Instead of asking for a scene description, each sample asks for a numeric answer grounded in what is clearly visible in the image.
 
-## Dataset
+Typical examples look like this.
 
-## Main Dataset in This Repository
+- How many umbrellas are in the foreground of the image
+- Count only the clearly visible umbrellas in the image
+- What integer equals the number of clearly visible umbrellas
 
-The most important dataset in this repository is:
+This makes the benchmark easier to score and easier to reproduce.
+
+## Main file
+
+The main dataset file is:
 
 - `adversal2k.json`
 
-This file is a numeric adversarial benchmark designed for stable multimodal evaluation. Each row is structured so the answer is numeric, typically a count, instead of an open-ended scene description.
+This is the file you should use for testing.
 
-The goal is simple:
+## Dataset size
 
-- reduce answer variability across repeated runs
-- make ground truth easier to verify
-- test whether MemEIC can preserve edited knowledge under compositional prompting
+- raw rows in `adversal2k.json`: `1990`
+- effective evaluable rows in the compositional pipeline: `1924`
 
-### Numeric Adversarial Benchmark
+The smaller evaluated count happens because some rows do not contain the full compositional `port_new` structure expected by the loader.
 
-The benchmark uses image-grounded prompts such as:
+## Data layout
 
-- how many umbrellas are in the foreground of the image
-- count only the clearly visible umbrellas in the image
-- what integer equals the number of clearly visible umbrellas
+Keep the files in this layout:
 
-Each example contains fields used by MemEIC for visual edit, textual edit, locality checks, and compositional portability. Important fields include:
+```text
+MemEIC/
+├── adversal2k.json
+├── coco images/
+├── CCKEB_images/
+├── checkpoints/
+├── easyeditor/
+├── hparams/
+├── hugging_cache/
+├── requirements.txt
+└── test_compositional_edit.py
+```
+
+The benchmark file uses relative image paths such as `coco images/000001.jpg`, so the image root should point to the repository folder itself.
+
+## Important fields in the data
+
+Each row contains the fields needed for visual edit, textual edit, locality checks, and portability checks.
+
+Important fields include:
 
 - `src`
 - `rephrase`
@@ -59,40 +76,55 @@ Each example contains fields used by MemEIC for visual edit, textual edit, local
 - `why_this_question_is_more_stable`
 - `count_object`
 
-### Dataset Size
+## How to use the data
 
-- raw rows in `adversal2k.json`: `1990`
-- effective evaluable samples loaded by the compositional MemEIC pipeline: `1924`
+### 1. Point evaluation to `adversal2k.json`
 
-The difference exists because a subset of rows does not contain the compositional `port_new` structure required by the loader.
-
-### Image Layout
-
-The numeric adversarial benchmark expects images under:
+Use the dataset path through the environment variable:
 
 ```text
-MemEIC/
-├── adversal2k.json
-├── coco images/
-└── CCKEB_images/
+MEMEIC_EVAL_DATASET=...\MemEIC\adversal2k.json
 ```
 
-For `adversal2k.json`, the active image root is usually the repository root itself:
+### 2. Point the image root to the repository folder
+
+Use:
 
 ```text
 MEMEIC_IMAGE_ROOT=...\MemEIC
 ```
 
-because the JSON contains relative paths such as `coco images/000001.jpg`.
+This is required because the JSON stores relative image paths.
 
-## Original CCKEB Benchmark
+### 3. Choose how many rows to test
 
-The repository still supports the original CCKEB files:
+Use:
 
-- `CCKEB_eval.json`
-- `CCKEB_images/mmkb_images/`
+```text
+MEMEIC_TEST_NUM=1924
+```
 
-If no environment override is provided, `test_compositional_edit.py` defaults to `CCKEB_eval.json`. If you want to evaluate the numeric adversarial benchmark, you must set `MEMEIC_EVAL_DATASET` explicitly.
+for the full evaluable benchmark.
+
+If you want a quicker run, use a smaller value such as `100`, `250`, or `500`.
+
+### 4. Choose whether to generate reports and artifacts
+
+Use:
+
+```text
+MEMEIC_ENABLE_ARTIFACTS=0
+```
+
+for faster benchmark-only testing.
+
+Use:
+
+```text
+MEMEIC_ENABLE_ARTIFACTS=1
+```
+
+if you also want predictions, reports, and visual outputs.
 
 ## Installation
 
@@ -100,41 +132,27 @@ If no environment override is provided, `test_compositional_edit.py` defaults to
 
 - Python 3.11
 - PyTorch 2.0.1 or compatible build
-- CUDA-enabled GPU for practical evaluation
+- CUDA GPU for practical evaluation
 
-### Install
+### Setup
 
 ```bash
-git clone https://github.com/MemEIC/MemEIC.git
-cd MemEIC
-
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Checkpoints and Model Assets
+## Checkpoints
 
-Place the required model assets in the expected folders before evaluation.
+The test pipeline expects model assets and adapters to be available in the repository.
 
-Typical directories used by this repository include:
-
-```text
-MemEIC/
-├── checkpoints/
-├── hugging_cache/
-└── hparams/
-```
-
-For the MemEIC LLaVA evaluation used in this repository, the active stage 2 adapter path is:
+For the LLaVA run used here, the active stage 2 adapter directory is:
 
 ```text
 checkpoints/llava_stage2
 ```
 
-## Evaluation
-
-## Main Evaluation Script
+## How to test `adversal2k`
 
 The main entrypoint is:
 
@@ -142,11 +160,9 @@ The main entrypoint is:
 test_compositional_edit.py
 ```
 
-It supports both default CCKEB evaluation and environment-controlled custom evaluation.
+### Full evaluation command
 
-### Evaluate the Numeric Adversarial Benchmark
-
-PowerShell command:
+Use this PowerShell command:
 
 ```powershell
 Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
@@ -156,30 +172,13 @@ $env:MEMEIC_EVAL_GPUS = "0"
 $env:MEMEIC_EVAL_GAPS = "0"
 $env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric"
 $env:MEMEIC_TEST_NUM = "1924"
-& "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
-```
-
-### Faster Evaluation Without Artifact Generation
-
-Artifact generation adds extra work for predictions, reports, visualizations, and failure-case summaries. To run a faster benchmark-only evaluation, disable artifacts:
-
-```powershell
-Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
-$env:MEMEIC_EVAL_DATASET = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\adversal2k.json"
-$env:MEMEIC_IMAGE_ROOT = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
-$env:MEMEIC_EVAL_GPUS = "0"
-$env:MEMEIC_EVAL_GAPS = "0"
-$env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric_noartifacts"
-$env:MEMEIC_TEST_NUM = "1924"
 $env:MEMEIC_ENABLE_ARTIFACTS = "0"
 & "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
 ```
 
-### Small Subset Evaluation
+### Faster small test
 
-If you want a quicker sanity check, reduce `MEMEIC_TEST_NUM`.
-
-Example for 100 samples:
+For a quick check on 100 rows:
 
 ```powershell
 Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
@@ -193,9 +192,25 @@ $env:MEMEIC_ENABLE_ARTIFACTS = "0"
 & "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
 ```
 
-## What the Evaluation Produces
+### Medium-size test
 
-Depending on settings, MemEIC writes outputs under the results directory you choose. Typical folders include:
+For 250 rows:
+
+```powershell
+Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_DATASET = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\adversal2k.json"
+$env:MEMEIC_IMAGE_ROOT = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_GPUS = "0"
+$env:MEMEIC_EVAL_GAPS = "0"
+$env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric_fast250"
+$env:MEMEIC_TEST_NUM = "250"
+$env:MEMEIC_ENABLE_ARTIFACTS = "0"
+& "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
+```
+
+## Output folders
+
+Test outputs are written to the result directory you choose. Typical folders are:
 
 ```text
 results_numeric/
@@ -207,32 +222,16 @@ results_numeric/
 └── visualizations/
 ```
 
-If `MEMEIC_ENABLE_ARTIFACTS=0`, the run skips the extra artifact pipeline and focuses on benchmark execution and core result files.
+If artifacts are disabled, the run skips the extra report pipeline and focuses on benchmark execution.
 
-## Important Notes for This Repository
+## Notes
 
-- `test_compositional_edit.py` defaults to `CCKEB_eval.json` only when `MEMEIC_EVAL_DATASET` is not set
+- if `MEMEIC_EVAL_DATASET` is not set, the script falls back to `CCKEB_eval.json`
+- if you want to test `adversal2k.json`, always set the dataset path explicitly
 - GPU selection is controlled by `MEMEIC_EVAL_GPUS`
-- on a single-GPU machine, MemEIC runs the active model on `cuda:0` and uses CPU for cache-side storage
-- the numeric benchmark is much slower than a standard feed-forward test because it performs sequential edit and evaluation across the benchmark
+- on a single-GPU machine, active model execution runs on `cuda:0`
+- full evaluation is slow because the benchmark performs sequential edit and sequential testing
 
-## Repository Structure
+## Summary
 
-```text
-MemEIC/
-├── README.md
-├── adversal2k.json
-├── CCKEB_images/
-├── checkpoints/
-├── coco images/
-├── easyeditor/
-├── figs/
-├── hparams/
-├── hugging_cache/
-├── requirements.txt
-└── test_compositional_edit.py
-```
-
-## Citation
-
-If you use MemEIC, CCKEB, or the numeric adversarial benchmark adaptation in this repository, cite the original MemEIC paper and clearly describe any benchmark modifications you made for numeric evaluation.
+If your goal is to test a stable numeric visual benchmark, use `adversal2k.json`, point the image root to the repository, choose the number of rows you want to evaluate, and run `test_compositional_edit.py` with the environment variables shown above.
