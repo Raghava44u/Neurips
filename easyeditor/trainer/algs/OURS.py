@@ -79,9 +79,12 @@ class OURS(EditableModel):
             elif config.model_name == "owl-2":
                 self.tok = transformers.AutoTokenizer.from_pretrained(config.name, use_fast=False, trust_remote_code=True)
             else:
+                tokenizer_kwargs = {"trust_remote_code": True}
+                if config.tokenizer_class == "LlamaTokenizer":
+                    tokenizer_kwargs["legacy"] = True
                 self.tok = getattr(transformers, config.tokenizer_class).from_pretrained(
-                    tok_name, trust_remote_code=True
-                )            
+                    tok_name, **tokenizer_kwargs
+                )
             if self.tok.pad_token == None or self.tok.pad_token == '':
                 self.tok.pad_token = self.tok.eos_token  
         else:
@@ -350,6 +353,20 @@ class OURS(EditableModel):
             for name, w in self.model.named_parameters():
                 w.requires_grad = name in weights
 
+            if self.config.use_lora:
+                active_adapter = "textual"
+                if connector_mode:
+                    active_adapter = ["visual", "textual", "connector"]
+                elif batch['image'] is not None:
+                    active_adapter = "visual"
+
+                if self.config.model_name == 'blip2':
+                    self.model.opt_model.set_adapter(active_adapter)
+                elif self.config.model_name == 'llava':
+                    self.model.set_adapter(active_adapter)
+                elif self.config.model_name == 'minigpt4':
+                    self.model.llama_model.set_adapter(active_adapter)
+
             batch = batch,
 
             if connector_mode:
@@ -448,7 +465,7 @@ class OURS(EditableModel):
                         if self.config.model_name == "blip2" or self.config.model_name == 'minigpt4':
                             outputs = self.model(rep_inputs)
                         if self.config.model_name == "llava":
-                            outputs = self.model.model(rep_inputs) # PeftModelForCasualLM -> LlavaLlamaForCausalLM (LoRA: PeftModelForCasualLM) 
+                            outputs = self.model(rep_inputs)
                     else:
                         outputs = self.model(rep_inputs)
 

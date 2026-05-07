@@ -3,10 +3,11 @@ import time
 import higher
 import torch
 import torch.nn as nn
-from editable_model import EditableModel
+from .editable_model import EditableModel
 from higher.patch import monkeypatch as make_functional
-from losses import kl_loc_loss
-from utils import _inner_params, _logits
+from ..losses import kl_loc_loss
+from .utils import get_inner_params as _inner_params
+from .utils import get_logits as _logits
 
 
 class FT(EditableModel):

@@ -22,6 +22,72 @@ from tqdm import tqdm
 from copy import deepcopy
 
 
+def _load_annotation_with_prompt_fallback(data_dir: str, config, annotation):
+    if config.alg != 'OURS' or config.query_generate:
+        return annotation
+
+    file_dir = os.path.dirname(data_dir)
+    file_name = os.path.basename(data_dir)
+    prompt_path = os.path.join(file_dir, 'prompt', file_name)
+    if os.path.exists(prompt_path):
+        return json.load(open(prompt_path, 'r'))
+
+    return annotation
+
+
+def _resolve_image_path(root: str, image_ref: str, data_dir: str) -> str:
+    normalized = str(image_ref).replace('\\', os.sep).replace('/', os.sep)
+    candidates = []
+
+    if os.path.isabs(normalized):
+        candidates.append(normalized)
+    else:
+        candidates.append(normalized)
+        candidates.append(os.path.join(root, normalized))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(data_dir)), normalized))
+
+    seen = set()
+    for candidate in candidates:
+        resolved = os.path.abspath(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if os.path.exists(resolved):
+            return resolved
+
+    return os.path.abspath(os.path.join(root, normalized))
+
+
+def _build_tokenizer(config):
+    tok_name = config.tokenizer_name if config.tokenizer_name is not None else config.name
+
+    if config.tokenizer_class == "QWenTokenizer":
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.name,
+            trust_remote_code=True,
+            pad_token='<|endoftext|>',
+        )
+    elif config.model_name == "owl-2":
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.name,
+            use_fast=False,
+            trust_remote_code=True,
+        )
+    else:
+        tokenizer_kwargs = {"trust_remote_code": True}
+        if config.tokenizer_class == "LlamaTokenizer":
+            tokenizer_kwargs["legacy"] = True
+        tokenizer = getattr(transformers, config.tokenizer_class).from_pretrained(
+            tok_name,
+            **tokenizer_kwargs,
+        )
+
+    if tokenizer.pad_token is None or tokenizer.pad_token == '':
+        tokenizer.pad_token = tokenizer.eos_token
+
+    return tokenizer
+
+
 class CaptionDataset(BaseDataset):
     def __init__(self, data_dir: str, size:  typing.Optional[int] = None, config=None, no_image=False, hop=None, *args, **kwargs):
         """
@@ -40,16 +106,7 @@ class CaptionDataset(BaseDataset):
             self.vis_processor_classifier = getattr(transformers, config.cls_image_proc_class).from_pretrained(config.cls_image_name)
 
         if (config is not None and hasattr(config, 'tokenizer_name')):
-            tok_name = (
-                config.tokenizer_name
-                if config.tokenizer_name is not None
-                else config.name
-            )
-            tokenizer = getattr(transformers, config.tokenizer_class).from_pretrained(
-                tok_name, trust_remote_code=True
-            )            
-            if tokenizer.pad_token == None or tokenizer.pad_token == '':
-                tokenizer.pad_token = tokenizer.eos_token  
+            tokenizer = _build_tokenizer(config)
                 
         vis_root = config.coco_image
         rephrase_root = config.rephrase_image
@@ -61,10 +118,7 @@ class CaptionDataset(BaseDataset):
 
         self.prompt = "Question: {} Short answer: "
 
-        if config.alg == 'OURS' and config.query_generate == False:
-            file_dir = os.path.dirname(data_dir)
-            file_name = os.path.basename(data_dir)
-            self.annotation = json.load(open(os.path.join(file_dir, 'prompt', file_name), 'r'))
+        self.annotation = _load_annotation_with_prompt_fallback(data_dir, config, self.annotation)
 
         data = []
         if size is not None:
@@ -85,9 +139,9 @@ class CaptionDataset(BaseDataset):
             if hop and 'port_new' not in record.keys():
                 continue
             
-            image_path = os.path.join(self.vis_root, record["image"])
-            rephrase_image_path = os.path.join(self.rephrase_root, record["image_rephrase"])
-            locality_image_path = os.path.join(self.vis_root, record['m_loc'])
+            image_path = _resolve_image_path(self.vis_root, record["image"], data_dir)
+            rephrase_image_path = _resolve_image_path(self.rephrase_root, record["image_rephrase"], data_dir)
+            locality_image_path = _resolve_image_path(self.vis_root, record['m_loc'], data_dir)
             
             item = {
                 'prompt': record['src'],
@@ -113,6 +167,7 @@ class CaptionDataset(BaseDataset):
 
             item['multimodal_locality_prompt'] = record['m_loc_q']
             item['multimodal_locality_ground_truth'] = record['m_loc_a']
+            item['source_record'] = deepcopy(record)
 
             if hop and 'port_new' in record.keys():
                 item['portability_prompt'] = []
@@ -364,21 +419,7 @@ class CompositionalCaptionDataset(BaseDataset):
             self.vis_processor_classifier = getattr(transformers, config.cls_image_proc_class).from_pretrained(config.cls_image_name)
 
         if (config is not None and hasattr(config, 'tokenizer_name')):
-            tok_name = (
-                config.tokenizer_name
-                if config.tokenizer_name is not None
-                else config.name
-            )
-            if config.tokenizer_class == "QWenTokenizer":
-                tokenizer = AutoTokenizer.from_pretrained(config.name, trust_remote_code=True, pad_token='<|endoftext|>')
-            elif config.model_name == "owl-2":
-                tokenizer = AutoTokenizer.from_pretrained(config.name, use_fast=False, trust_remote_code=True)
-            else:
-                tokenizer = getattr(transformers, config.tokenizer_class).from_pretrained(
-                    tok_name, trust_remote_code=True
-                )            
-            if tokenizer.pad_token == None or tokenizer.pad_token == '':
-                tokenizer.pad_token = tokenizer.eos_token  
+            tokenizer = _build_tokenizer(config)
                 
         vis_root = config.coco_image
         rephrase_root = config.rephrase_image
@@ -390,10 +431,7 @@ class CompositionalCaptionDataset(BaseDataset):
 
         self.prompt = "Question: {} Short answer: "
 
-        if config.alg == 'OURS' and config.query_generate == False:
-            file_dir = os.path.dirname(data_dir)
-            file_name = os.path.basename(data_dir)
-            self.annotation = json.load(open(os.path.join(file_dir, 'prompt', file_name), 'r'))
+        self.annotation = _load_annotation_with_prompt_fallback(data_dir, config, self.annotation)
 
         data = []
         if size is not None:
@@ -419,9 +457,9 @@ class CompositionalCaptionDataset(BaseDataset):
             Visual Edit Dataset
             '''
 
-            image_path = os.path.join(self.vis_root, record["image"])
-            rephrase_image_path = os.path.join(self.rephrase_root, record["image_rephrase"])
-            locality_image_path = os.path.join(self.vis_root, record['m_loc'])
+            image_path = _resolve_image_path(self.vis_root, record["image"], data_dir)
+            rephrase_image_path = _resolve_image_path(self.rephrase_root, record["image_rephrase"], data_dir)
+            locality_image_path = _resolve_image_path(self.vis_root, record['m_loc'], data_dir)
             
             item = {
                 'prompt': record['src'],
@@ -439,7 +477,8 @@ class CompositionalCaptionDataset(BaseDataset):
                 'locality_ground_truth': record['loc_ans'],
                 'multimodal_locality_image': locality_image_path,
                 'multimodal_locality_prompt': record['m_loc_q'],
-                'multimodal_locality_ground_truth': record['m_loc_a']
+                'multimodal_locality_ground_truth': record['m_loc_a'],
+                'source_record': deepcopy(record)
             }
 
             if hop and 'port_new' in record.keys():
@@ -1213,16 +1252,7 @@ class CompositionalDataset(BaseDataset):
             raise NotImplementedError("unknown model class")
         # Load Tokenizer
         if (config is not None and hasattr(config, 'tokenizer_name')):
-            tok_name = (
-                config.tokenizer_name
-                if config.tokenizer_name is not None
-                else config.name
-            )
-            tokenizer = getattr(transformers, config.tokenizer_class).from_pretrained(
-                tok_name, trust_remote_code=True
-            )            
-            if tokenizer.pad_token == None or tokenizer.pad_token == '':
-                tokenizer.pad_token = tokenizer.eos_token  
+            tokenizer = _build_tokenizer(config)
                 
         vis_root = config.coco_image
         rephrase_root = config.rephrase_image
@@ -1259,14 +1289,15 @@ class CompositionalDataset(BaseDataset):
                 'pred': record['pred'],
                 'target': record['alt'],
                 'rephrase_prompt': record['rephrase'],
-                'image': os.path.join(self.vis_root, record["image"]),
-                'image_rephrase': os.path.join(self.rephrase_root, record["image_rephrase"]),
+                'image': _resolve_image_path(self.vis_root, record["image"], data_dir),
+                'image_rephrase': _resolve_image_path(self.rephrase_root, record["image_rephrase"], data_dir),
                 'cond': "{} >> {} || {}".format(record['pred'], record['alt'], record['src']),
                 'locality_prompt': record['loc'],
                 'locality_ground_truth': record['loc_ans'],
-                'multimodal_locality_image': os.path.join(self.vis_root, record['m_loc']),
+                'multimodal_locality_image': _resolve_image_path(self.vis_root, record['m_loc'], data_dir),
                 'multimodal_locality_prompt': record['m_loc_q'],
-                'multimodal_locality_ground_truth': record['m_loc_a']
+                'multimodal_locality_ground_truth': record['m_loc_a'],
+                'source_record': deepcopy(record)
             }
 
             ##  Textual Edit Data ##

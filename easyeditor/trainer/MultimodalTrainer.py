@@ -1,4 +1,5 @@
 from .BaseTrainer import *
+import copy
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from .utils import (
     time_delta_seconds,
 )
 from .algs.utils import multimodal_tokenize
+from .adversarial_artifacts import AdversarialArtifactWriter
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -41,6 +43,121 @@ class MultimodalTrainer(BaseTrainer):
                 batch = next(self.edit_gen)
                 self.model.loc_ids = batch["loc"]["input_ids"]
                 self.model.loc_masks = batch["loc"]["attention_mask"]
+
+    def _build_artifact_writer(self, artifact_options):
+        if not artifact_options or not artifact_options.get("enabled", True):
+            return None
+        return AdversarialArtifactWriter(
+            artifact_options["repo_root"],
+            artifact_options.get("results_root"),
+        )
+
+    def _move_to_device(self, value, device):
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {key: self._move_to_device(item, device) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._move_to_device(item, device) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._move_to_device(item, device) for item in value)
+        return value
+
+    def _cache_device(self, gpus):
+        if len(gpus) < 2 or gpus[0] == gpus[1]:
+            return "cpu"
+        return f"cuda:{gpus[1]}"
+
+    def _active_device(self, gpus):
+        return f"cuda:{gpus[0]}"
+
+    def _cache_topk_reference(self, logits, k, device):
+        return torch.topk(logits, k=k, dim=-1).indices.detach().to(device=device, dtype=torch.int32)
+
+    def _artifact_model_name(self, artifact_options):
+        if artifact_options and artifact_options.get("model_name"):
+            return artifact_options["model_name"]
+        return f"{self.config.alg}-{self.config.model_name}"
+
+    def _decode_prediction_ids(self, token_ids):
+        if token_ids is None:
+            return ""
+        if isinstance(token_ids, torch.Tensor):
+            ids = token_ids.detach().cpu().view(-1).tolist()
+        else:
+            ids = list(token_ids)
+        filtered = [token for token in ids if token not in {-100, 0, None}]
+        if not filtered:
+            return ""
+        tokenizer = getattr(self.val_set, "tok", None) or getattr(self.train_set, "tok", None)
+        if tokenizer is None:
+            return " ".join(str(token) for token in filtered)
+        return " ".join(tokenizer.decode(filtered, skip_special_tokens=True).split())
+
+    def _evaluate_port_payload(self, edited_model, port_payload):
+        with torch.no_grad():
+            port_outputs = edited_model(port_payload)
+            port_labels = port_payload["labels"]
+            if not isinstance(port_outputs, torch.Tensor):
+                port_logits = port_outputs.logits
+            else:
+                port_logits = port_outputs
+            if port_logits.shape[1] > port_labels.shape[1]:
+                port_dict = self.model.edit_loss_fn(self.config, port_logits, port_labels)
+            else:
+                port_dict = self.model.edit_loss_fn(self.config, port_logits, port_labels[:, -port_logits.shape[1]-1:])
+
+        prediction = self._decode_prediction_ids(port_dict.get("pred_ids"))
+        target = self._decode_prediction_ids(port_dict.get("targ_ids"))
+        correctness = port_dict["acc"].item() >= 0.999 or prediction.strip().lower() == target.strip().lower()
+        return {
+            "prediction": prediction,
+            "target": target,
+            "correct": correctness,
+        }
+
+    def _collect_adversarial_records(self, edited_model, source_item, artifact_writer, artifact_options, gap_num):
+        if artifact_writer is None or source_item is None:
+            return []
+
+        source_record = source_item.get("source_record")
+        if not source_record or "port_new" not in source_record:
+            return []
+
+        records = []
+        model_name = self._artifact_model_name(artifact_options)
+        for port_entry in source_record.get("port_new", []):
+            qa = port_entry.get("Q&A", {})
+            question = qa.get("Question")
+            answer = qa.get("Answer")
+            if not question or answer is None:
+                continue
+
+            synthetic_item = copy.deepcopy(source_item)
+            synthetic_item["portability_prompt"] = [question]
+            synthetic_item["portability_ground_truth"] = [answer]
+            synthetic_item["portability_prompt_query"] = qa.get("Query", question)
+
+            synthetic_batch = self.val_set.collate_fn([synthetic_item])
+            if synthetic_batch.get("port") is None:
+                continue
+
+            evaluation = self._evaluate_port_payload(edited_model, synthetic_batch["port"][0])
+            records.append(
+                artifact_writer.build_prediction_record(
+                    image=source_record.get("image", synthetic_item.get("image", "")),
+                    question=question,
+                    ground_truth=answer,
+                    model_prediction=evaluation["prediction"],
+                    correct=evaluation["correct"],
+                    reasoning_type=port_entry.get("port_type", "comp"),
+                    model_name=model_name,
+                    gap_num=gap_num,
+                    source_record=source_record,
+                )
+            )
+
+        return records
 
     def edit_step(self, batch, training: bool):
         self.model.train(training)
@@ -315,7 +432,7 @@ class MultimodalTrainer(BaseTrainer):
             )
 
 
-    def test_sequencial_step(self, batch, edited_model, base_logits, base_image_logits):
+    def test_sequencial_step(self, batch, edited_model, base_top1_logits, base_top10_image_logits):
         info_dict = {}
 
         ##############################################################################
@@ -371,8 +488,7 @@ class MultimodalTrainer(BaseTrainer):
                 post_base_logits = post_base_outputs.logits
             else:
                 post_base_logits = post_base_outputs
-            post_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(post_base_logits, dim=-1), k=1, dim=-1).indices
-            base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(base_logits, dim=-1), k=1, dim=-1).indices
+            post_base_logits_softmax_top_k = torch.topk(post_base_logits, k=1, dim=-1).indices
             del post_base_outputs, post_base_logits
             torch.cuda.empty_cache()
 
@@ -382,16 +498,15 @@ class MultimodalTrainer(BaseTrainer):
                 post_image_base_logits = post_image_base_outputs.logits
             else:
                 post_image_base_logits = post_image_base_outputs
-            post_image_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(post_image_base_logits, dim=-1), k=10, dim=-1).indices
-            base_image_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(base_image_logits, dim=-1), k=10, dim=-1).indices
+            post_image_base_logits_softmax_top_k = torch.topk(post_image_base_logits, k=10, dim=-1).indices
             del post_image_base_outputs, post_image_base_logits
             torch.cuda.empty_cache()
 
         info_dict['inner/acc'] = inner_edit_dict["acc"].item()
         info_dict['edit/acc'] = post_edit_dict["acc"].item()
         info_dict['image_rephrase/acc'] = image_rephrase_edit_dict["acc"].item()
-        info_dict["loc/acc"] = sum(post_base_logits_softmax_top_k.view(-1) == base_logits_softmax_top_k.view(-1))/post_base_logits_softmax_top_k.view(-1).shape[0]
-        info_dict["image_loc/acc"] = sum(post_image_base_logits_softmax_top_k.view(-1) == base_image_logits_softmax_top_k.view(-1))/post_image_base_logits_softmax_top_k.view(-1).shape[0]
+        info_dict["loc/acc"] = sum(post_base_logits_softmax_top_k.view(-1) == base_top1_logits.view(-1))/post_base_logits_softmax_top_k.view(-1).shape[0]
+        info_dict["image_loc/acc"] = sum(post_image_base_logits_softmax_top_k.view(-1) == base_top10_image_logits.view(-1))/post_image_base_logits_softmax_top_k.view(-1).shape[0]
         ##############################################################################
 
         ################ portability #################
@@ -414,7 +529,7 @@ class MultimodalTrainer(BaseTrainer):
 
         return info_dict
    
-    def test_sequential_step_comp(self, batch, edited_model, base_logits_vis, base_image_logits_vis, base_logits_text):
+    def test_sequential_step_comp(self, batch, edited_model, base_top1_logits_vis, base_top10_image_logits_vis, base_top1_logits_text):
         info_dict = {}
         edited_model.eval()
         
@@ -475,8 +590,7 @@ class MultimodalTrainer(BaseTrainer):
                 post_base_logits = post_base_outputs.logits
             else:
                 post_base_logits = post_base_outputs
-            post_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(post_base_logits, dim=-1), k=1, dim=-1).indices
-            base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(base_logits_vis, dim=-1), k=1, dim=-1).indices
+            post_base_logits_softmax_top_k = torch.topk(post_base_logits, k=1, dim=-1).indices
             del post_base_outputs, post_base_logits
             torch.cuda.empty_cache()
 
@@ -487,16 +601,15 @@ class MultimodalTrainer(BaseTrainer):
                 post_image_base_logits = post_image_base_outputs.logits
             else:
                 post_image_base_logits = post_image_base_outputs
-            post_image_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(post_image_base_logits, dim=-1), k=10, dim=-1).indices
-            base_image_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(base_image_logits_vis, dim=-1), k=10, dim=-1).indices
+            post_image_base_logits_softmax_top_k = torch.topk(post_image_base_logits, k=10, dim=-1).indices
             del post_image_base_outputs, post_image_base_logits
             torch.cuda.empty_cache()
         
         info_dict['inner/acc'] = inner_edit_dict["acc"].item()
         info_dict['edit/acc'] = post_edit_dict["acc"].item()
         info_dict['image_rephrase/acc'] = image_rephrase_edit_dict["acc"].item()
-        info_dict["loc/acc"] = sum(post_base_logits_softmax_top_k.view(-1) == base_logits_softmax_top_k.view(-1))/post_base_logits_softmax_top_k.view(-1).shape[0]
-        info_dict["image_loc/acc"] = sum(post_image_base_logits_softmax_top_k.view(-1) == base_image_logits_softmax_top_k.view(-1))/post_image_base_logits_softmax_top_k.view(-1).shape[0]
+        info_dict["loc/acc"] = sum(post_base_logits_softmax_top_k.view(-1) == base_top1_logits_vis.view(-1))/post_base_logits_softmax_top_k.view(-1).shape[0]
+        info_dict["image_loc/acc"] = sum(post_image_base_logits_softmax_top_k.view(-1) == base_top10_image_logits_vis.view(-1))/post_image_base_logits_softmax_top_k.view(-1).shape[0]
         ##############################################################################
         
         with torch.no_grad():
@@ -540,22 +653,24 @@ class MultimodalTrainer(BaseTrainer):
                 text_post_base_logits = text_post_base_outputs.logits
             else:
                 text_post_base_logits = text_post_base_outputs
-            text_post_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(text_post_base_logits, dim=-1), k=1, dim=-1).indices
-            text_base_logits_softmax_top_k = torch.topk(torch.nn.functional.softmax(base_logits_text, dim=-1), k=1, dim=-1).indices
+            text_post_base_logits_softmax_top_k = torch.topk(text_post_base_logits, k=1, dim=-1).indices
             del text_post_base_outputs, text_post_base_logits
             torch.cuda.empty_cache()
 
         info_dict["text_inner/acc"] = text_inner_edit_dict["acc"].item()
         info_dict["text_edit/acc"] = text_post_edit_dict["acc"].item()
-        info_dict["text_loc/acc"] = sum(text_post_base_logits_softmax_top_k.view(-1) == text_base_logits_softmax_top_k.view(-1))/text_post_base_logits_softmax_top_k.view(-1).shape[0]
+        info_dict["text_loc/acc"] = sum(text_post_base_logits_softmax_top_k.view(-1) == base_top1_logits_text.view(-1))/text_post_base_logits_softmax_top_k.view(-1).shape[0]
         ##############################################################################
 
         ################ Compositional portability #################
 
         # set lora: visual & textual inference
 
-        assert len(batch["textual_edit"]['port']) == 1, "batch['textual_edit']['port'] exist and have only one element"
-        port = batch["textual_edit"]['port'][0]
+        port_batch = batch.get("textual_edit", {}).get("port")
+        if port_batch is None:
+            port_batch = batch.get('port')
+        assert port_batch is not None and len(port_batch) == 1, "portability batch must have exactly one element"
+        port = port_batch[0]
         with torch.no_grad():
             port_outputs = edited_model(port)
             port_labels = port["labels"]
@@ -578,10 +693,11 @@ class MultimodalTrainer(BaseTrainer):
 
 
     ## Baselines: LoRA & FT ##
-    def test_sequencial_compositional_ft(self, log: bool = False, test_num=200, gap_num=0):
+    def test_sequencial_compositional_ft(self, log: bool = False, test_num=200, gap_num=0, artifact_options=None):
         from datetime import datetime
         cur_time = datetime.now().strftime("%y%m%d_%H%M%S")
         self.model.train(True)
+        artifact_writer = self._build_artifact_writer(artifact_options)
 
         steps = test_num + gap_num
         if log:
@@ -591,6 +707,8 @@ class MultimodalTrainer(BaseTrainer):
         start_time = time.time()
         ## 저장할 내용
         val_data_store = []
+        source_item_store = []
+        prediction_records = []
 
         # visul-data
         base_logits_store_vis = []
@@ -605,6 +723,8 @@ class MultimodalTrainer(BaseTrainer):
             if val_step < test_num:
                 # 1.1) visual edit part
                 val_data_store.append(batch) # batch 데이터 저장
+                if artifact_writer is not None:
+                    source_item_store.append(self.val_set[val_step])
                 with torch.no_grad():
                     base_outputs = self.model(batch["visual_edit"]["loc"]) # T-Loc inference 저장
                     if not isinstance(base_outputs, torch.Tensor):
@@ -650,6 +770,7 @@ class MultimodalTrainer(BaseTrainer):
             if val_step >= gap_num: 
                 # 기존 저장했던 batch, t-loc & i-loc-logit 불러옴. For Test
                 stored_batch = val_data_store.pop(0) # vis + text
+                stored_source_item = source_item_store.pop(0) if artifact_writer is not None else None
                 stored_base_logits_vis = base_logits_store_vis.pop(0)
                 stored_base_image_logits_vis = base_image_logits_store_vis.pop(0)
                 stored_base_logits_tex = base_logits_store_tex.pop(0)
@@ -659,6 +780,15 @@ class MultimodalTrainer(BaseTrainer):
                     stored_batch, edited_model, stored_base_logits_vis, stored_base_image_logits_vis, stored_base_logits_tex
                     )
                 averager.add(info_dict)
+                prediction_records.extend(
+                    self._collect_adversarial_records(
+                        edited_model,
+                        stored_source_item,
+                        artifact_writer,
+                        artifact_options,
+                        gap_num,
+                    )
+                )
 
             # logging?
             if (log and val_step >= gap_num and (val_step) % self.config.log_interval == 0):
@@ -678,6 +808,12 @@ class MultimodalTrainer(BaseTrainer):
         stats = averager.average()
         stats["eval_time/elapsed"] = elapsed
         stats["eval_time/average"] = elapsed / steps
+        if artifact_writer is not None and prediction_records:
+            artifact_stats = artifact_writer.finalize(prediction_records)
+            stats["artifact/overall_accuracy"] = artifact_stats["overall_accuracy"]
+            stats["artifact/adversarial_failure_rate"] = artifact_stats["adversarial_failure_rate"]
+            stats["artifact/hallucination_rate"] = artifact_stats["hallucination_rate"]
+            stats["artifact/prediction_count"] = artifact_stats["prediction_count"]
 
         if 'llava' in self.config.model_name.lower():
             if os.path.basename(self.config.name) == "llava-v1.5-13b":
@@ -1381,10 +1517,13 @@ class MultimodalTrainer(BaseTrainer):
 
         return info_dict
     
-    def test_sequencial_multi_gpus(self, log: bool = False, test_num=500, gap_num=0, comp=False, training=False, gpus=[0,1]):
+    def test_sequencial_multi_gpus(self, log: bool = False, test_num=500, gap_num=0, comp=False, training=False, gpus=[0,1], artifact_options=None):
         from datetime import datetime
         cur_time = datetime.now().strftime("%y%m%d_%H%M%S")
         self.model.train(True)
+        artifact_writer = self._build_artifact_writer(artifact_options)
+        cache_device = self._cache_device(gpus)
+        active_device = self._active_device(gpus)
 
         steps = test_num + gap_num
         if log:
@@ -1395,15 +1534,19 @@ class MultimodalTrainer(BaseTrainer):
         start_time = time.time()
 
         val_data_store = []
-        base_logits_store_vis = []
-        base_image_logits_store_vis = []
-        base_logits_store_text = []
+        source_item_store = []
+        base_top1_store_vis = []
+        base_top10_store_image_vis = []
+        base_top1_store_text = []
+        prediction_records = []
         
 
         pbar = tqdm(total=test_num, desc=f"Prepare", ncols=100)
         for val_step, batch in enumerate(self.val_loader):
             if val_step < test_num:
-                val_data_store.append(batch)
+                val_data_store.append(self._move_to_device(batch, cache_device))
+                if artifact_writer is not None:
+                    source_item_store.append(self.val_set[val_step])
                 # Visual Edit
                 with torch.no_grad():
                     base_outputs = self.model(batch["loc"])
@@ -1411,14 +1554,15 @@ class MultimodalTrainer(BaseTrainer):
                         base_logits = base_outputs.logits
                     else:  
                         base_logits = base_outputs
-                    base_logits_store_vis.append(base_logits.clone().detach().to('cuda:' + str(gpus[1])))
+                    base_top1_store_vis.append(self._cache_topk_reference(base_logits, k=1, device=cache_device))
                         
                     base_image_outputs = self.model(batch["loc_image"])
                     if not isinstance(base_image_outputs, torch.Tensor):
                         base_image_logits = base_image_outputs.logits
                     else:
                         base_image_logits = base_image_outputs
-                    base_image_logits_store_vis.append(base_image_logits.clone().detach().to('cuda:' + str(gpus[1])))
+                    base_top10_store_image_vis.append(self._cache_topk_reference(base_image_logits, k=10, device=cache_device))
+                    del base_outputs, base_logits, base_image_outputs, base_image_logits
                 
                 # Textual Edit
                 if comp and "textual_edit" in batch.keys():
@@ -1428,7 +1572,11 @@ class MultimodalTrainer(BaseTrainer):
                             base_logits = base_outputs.logits
                         else:  
                             base_logits = base_outputs
-                        base_logits_store_text.append(base_logits.clone().detach().to('cuda:' + str(gpus[1])))
+                        base_top1_store_text.append(self._cache_topk_reference(base_logits, k=1, device=cache_device))
+                        del base_outputs, base_logits
+
+                if cache_device == "cpu":
+                    torch.cuda.empty_cache()
 
                 pbar.update(1)
             else:
@@ -1444,18 +1592,31 @@ class MultimodalTrainer(BaseTrainer):
                 edited_model, _ = edited_model.edit(batch["textual_edit"]["edit_inner"], batch["textual_edit"]["cond"], detach_history=True)
 
             if val_step >= gap_num:
-                stored_batch = val_data_store.pop(0)
-                stored_base_logits_vis = base_logits_store_vis.pop(0).to('cuda:' + str(gpus[0]))
-                stored_base_image_logits_vis = base_image_logits_store_vis.pop(0).to('cuda:' + str(gpus[0]))
+                stored_batch = self._move_to_device(val_data_store.pop(0), active_device)
+                stored_source_item = source_item_store.pop(0) if artifact_writer is not None else None
+                stored_base_top1_vis = base_top1_store_vis.pop(0).to(active_device)
+                stored_base_top10_image_vis = base_top10_store_image_vis.pop(0).to(active_device)
                 if comp:
-                    stored_base_logits_text = base_logits_store_text.pop(0).to('cuda:' + str(gpus[0]))
+                    stored_base_top1_text = base_top1_store_text.pop(0).to(active_device)
                     # if self.config.alg_name == 'WISE':
                     #     info_dict = self.test_sequential_step_comp(stored_batch, self.model, stored_base_logits_vis, stored_base_image_logits_vis, stored_base_logits_text)
                     # else:
-                    info_dict = self.test_sequential_step_comp(stored_batch, edited_model, stored_base_logits_vis, stored_base_image_logits_vis, stored_base_logits_text)
+                    info_dict = self.test_sequential_step_comp(stored_batch, edited_model, stored_base_top1_vis, stored_base_top10_image_vis, stored_base_top1_text)
                 else:
-                    info_dict = self.test_sequencial_step(stored_batch, edited_model, stored_base_logits_vis, stored_base_image_logits_vis)
+                    info_dict = self.test_sequencial_step(stored_batch, edited_model, stored_base_top1_vis, stored_base_top10_image_vis)
                 averager.add(info_dict)
+                if comp:
+                    prediction_records.extend(
+                        self._collect_adversarial_records(
+                            edited_model,
+                            stored_source_item,
+                            artifact_writer,
+                            artifact_options,
+                            gap_num,
+                        )
+                    )
+                if cache_device == "cpu":
+                    torch.cuda.empty_cache()
 
             if (log and val_step >= gap_num and (val_step) % self.config.log_interval == 0):
                 self._inline_seq_log(
@@ -1473,6 +1634,12 @@ class MultimodalTrainer(BaseTrainer):
         stats = averager.average()
         stats["eval_time/elapsed"] = elapsed
         stats["eval_time/average"] = elapsed / steps
+        if artifact_writer is not None and prediction_records:
+            artifact_stats = artifact_writer.finalize(prediction_records)
+            stats["artifact/overall_accuracy"] = artifact_stats["overall_accuracy"]
+            stats["artifact/adversarial_failure_rate"] = artifact_stats["adversarial_failure_rate"]
+            stats["artifact/hallucination_rate"] = artifact_stats["hallucination_rate"]
+            stats["artifact/prediction_count"] = artifact_stats["prediction_count"]
 
         adapter_path = f"{self.config.results_dir}/{cur_time}_{self.config.alg}_{self.config.model_name}_port{self.val_set.hop}_seqgap{gap_num}"
         results_path = f"{self.config.results_dir}/{cur_time}_{self.config.alg}_{self.config.model_name}_port{self.val_set.hop}_seqgap{gap_num}.json"
