@@ -1,290 +1,238 @@
-<p align="center">
-  <img src="figs/logo.png" alt="MemEIC Logo" width="600">
-</p>
+# MemEIC
 
-<h2 align="center">MemEIC: A Step Toward Continual and Compositional Knowledge Editing</h2>
+MemEIC is a vision-language knowledge editing framework for continual and compositional editing. This repository contains the evaluation code, model configuration files, checkpoints layout, and benchmark assets used to run MemEIC on both the original CCKEB benchmark and a numeric adversarial benchmark built for stable image-grounded answers.
 
-<p align="center">
-  <b>NeurIPS 2025</b>
-</p>
+This version of the repository is centered on dataset-driven evaluation. The main addition is a numeric adversarial benchmark in which each example is rewritten as a counting question with an integer ground truth, so repeated prompts against the same image are less likely to drift semantically.
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2510.25798">
-    <img src="https://img.shields.io/badge/arXiv-2510.25798-b31b1b.svg" alt="arXiv">
-  </a>
-  <a href="https://huggingface.co/datasets/MemEIC/CCKEB">
-    <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Datasets-yellow" alt="Hugging Face Datasets">
-  </a>
-  <a href="https://huggingface.co/MemEIC/MemEIC-checkpoints">
-    <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Checkpoints-orange" alt="Hugging Face Checkpoints">
-  </a>
-  <a href="https://opensource.org/licenses/BSD-3-Clause">
-    <img src="https://img.shields.io/badge/License-BSD%203--Clause-blue.svg" alt="License">
-  </a>
-</p>
+## What This Repository Contains
 
-## 📢 News
-- **[Oct 2025]** Paper accepted at NeurIPS 2025! 🎉
-- **[Dec 2025]** We release our dataset, CCKEB
-- **[Feb 2026]** We release our code for evaluation
-- **[Mar 2026]** We release Stage 1 (Mem-E) & Stage 2 (Mem-I) checkpoints
+- MemEIC evaluation code in `easyeditor/`
+- MemEIC evaluation entrypoint in `test_compositional_edit.py`
+- hyperparameter files in `hparams/`
+- MemEIC checkpoints under `checkpoints/`
+- the numeric adversarial benchmark in `adversal2k.json`
+- image assets in `coco images/` and `CCKEB_images/`
 
+## Dataset
 
-## 📖 Overview
+## Main Dataset in This Repository
 
-**MemEIC** introduces a novel approach for **Continual and Compositional Knowledge Editing** in Vision-Language Models (VLMs). Our method addresses the challenge of editing multiple knowledge types (visual and textual) while maintaining compositional reasoning capabilities.
+The most important dataset in this repository is:
 
-### Key Features
-- **MEM-E(Modality-Aware External Memory)**: Dual external memory for cross-modal evidence retrieval
-- **MEM-I(Internal Separated Knowledge Integration)**: Separate Visual/Textual adapters on FFN layers
-- **Knowledge Connector (KC)**: Attention-based LoRA that bridges visual and textual knowledge
-- **CCKEB Dataset**: Compositional Chain Knowledge Editing Benchmark
+- `adversal2k.json`
 
+This file is a numeric adversarial benchmark designed for stable multimodal evaluation. Each row is structured so the answer is numeric, typically a count, instead of an open-ended scene description.
 
-## 🛠️ Installation
+The goal is simple:
+
+- reduce answer variability across repeated runs
+- make ground truth easier to verify
+- test whether MemEIC can preserve edited knowledge under compositional prompting
+
+### Numeric Adversarial Benchmark
+
+The benchmark uses image-grounded prompts such as:
+
+- how many umbrellas are in the foreground of the image
+- count only the clearly visible umbrellas in the image
+- what integer equals the number of clearly visible umbrellas
+
+Each example contains fields used by MemEIC for visual edit, textual edit, locality checks, and compositional portability. Important fields include:
+
+- `src`
+- `rephrase`
+- `pred`
+- `alt`
+- `image`
+- `loc`
+- `loc_ans`
+- `m_loc`
+- `m_loc_q`
+- `m_loc_a`
+- `port_new`
+- `textual_edit`
+- `original_question`
+- `rewritten_question`
+- `original_ground_truth`
+- `improved_ground_truth`
+- `reasoning_type`
+- `why_this_question_is_more_stable`
+- `count_object`
+
+### Dataset Size
+
+- raw rows in `adversal2k.json`: `1990`
+- effective evaluable samples loaded by the compositional MemEIC pipeline: `1924`
+
+The difference exists because a subset of rows does not contain the compositional `port_new` structure required by the loader.
+
+### Image Layout
+
+The numeric adversarial benchmark expects images under:
+
+```text
+MemEIC/
+├── adversal2k.json
+├── coco images/
+└── CCKEB_images/
+```
+
+For `adversal2k.json`, the active image root is usually the repository root itself:
+
+```text
+MEMEIC_IMAGE_ROOT=...\MemEIC
+```
+
+because the JSON contains relative paths such as `coco images/000001.jpg`.
+
+## Original CCKEB Benchmark
+
+The repository still supports the original CCKEB files:
+
+- `CCKEB_eval.json`
+- `CCKEB_images/mmkb_images/`
+
+If no environment override is provided, `test_compositional_edit.py` defaults to `CCKEB_eval.json`. If you want to evaluate the numeric adversarial benchmark, you must set `MEMEIC_EVAL_DATASET` explicitly.
+
+## Installation
 
 ### Requirements
-- Python >= 3.11
-- PyTorch >= 2.0.1
-- CUDA >= 11.7
 
-### Setup
+- Python 3.11
+- PyTorch 2.0.1 or compatible build
+- CUDA-enabled GPU for practical evaluation
+
+### Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/MemEIC/MemEIC.git
 cd MemEIC
 
-# Create conda environment
-conda create -n memeic python=3.11
-conda activate memeic
-
-# Install dependencies
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Pre-trained Models
+## Checkpoints and Model Assets
 
-Please download the models relevant to your experiment and place them in the `hugging_cache` directory.
+Place the required model assets in the expected folders before evaluation.
 
-#### 1. Common Requirements
-*Required for all experiments.*
-- `hugging_cache/bert-base-uncased`
-- `hugging_cache/distilbert-base-cased`
-- `hugging_cache/all-MiniLM-L6-v2`
+Typical directories used by this repository include:
 
-#### 2. Model-Specific Requirements
-*Download only the models you intend to use.*
-
-| Model         | Required Files / Directories                                                                                                                               |
-| :------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **LLaVA-1.5** | `hugging_cache/llava-v1.5-7b`<br>`hugging_cache/vicuna-7b-v1.5`<br>`openai/clip-vit-large-patch14-336`                                                     |
-| **MiniGPT-4** | `hugging_cache/vicuna-7b`<br>`hugging_cache/pretrained_minigpt4_7b.pth`<br>`hugging_cache/blip2_pretrained_flant5xxl.pth`<br>`hugging_cache/eva_vit_g.pth` |
-| **BLIP-2**    | `hugging_cache/opt-2.7b`<br>`hugging_cache/blip2_pretrained_opt2.7b.pth`<br>`hugging_cache/eva_vit_g.pth`                                                  |
-
-> **Note**: You can download these models from [Hugging Face](https://huggingface.co/) or use the links provided in the [VLKEB repository](https://github.com/VLKEB/VLKEB).
-
-
-## 📦 Dataset
-
-### CCKEB (Compositional Chain Knowledge Editing Benchmark)
-
-Download the dataset from 🤗 Hugging Face: [MemEIC/CCKEB](https://huggingface.co/datasets/MemEIC/CCKEB)
-
-### Directory Structure Setup
-Please organize your data as follows to ensure compatibility:
-
-```
-datasets/
-├── CCKEB_train.json
-├── CCKEB_eval.json
-└── CCKEB_images/          # Image directory
-    └── mmkb_images/       # Contains images 
-```
-
-
-## 🚀 Usage (Test)
-
-### Baselines
-
-#### Fine-Tuning (FT)
-```bash
-# LLaVA
-python test_compositional_edit.py test_LLaVA_FT_comp
-
-# MiniGPT4
-python test_compositional_edit.py test_MiniGPT4_FT_comp
-```
-
-#### LoRA (single adapter in FFN)
-```bash
-# LLaVA
-python test_compositional_edit.py test_LLaVA_one_lora_comp
-
-# MiniGPT4
-python test_compositional_edit.py test_MiniGPT4_one_lora_comp
-```
-
-#### SERAC (need to train first)
-```bash
-# LLaVA
-python test_compositional_edit.py test_LLaVA_SERAC_comp
-
-# MiniGPT4
-python test_compositional_edit.py test_MiniGPT4_SERAC_comp
-```
-
-#### WISE
-```bash
-# LLaVA
-python test_compositional_edit.py test_LLaVA_WISE_comp
-
-# MiniGPT4
-python test_compositional_edit.py test_MiniGPT4_WISE_comp
-```
-
-### MemEIC (Ours)
-
-#### Stage 1: Mem-E (External Memory) Checkpoints
-
-Download the pre-trained Stage 1 checkpoints from HuggingFace: [MemEIC/MemEIC-checkpoints](https://huggingface.co/MemEIC/MemEIC-checkpoints)
-
-| Model | Checkpoint |
-|-------|------------|
-| LLaVA-1.5-7B | `llava_stage1.pt` |
-| MiniGPT-4 | `minigpt4_stage1.pt` |
-
-Place the downloaded checkpoints in the `checkpoints/` directory:
-
-```bash
-mkdir -p checkpoints
-# Download from HuggingFace and place files here
-```
-
-```
+```text
 MemEIC/
-└── checkpoints/
-    ├── llava_stage1.pt
-    ├── minigpt4_stage1.pt
-    ├── llava_stage2/
-    │   ├── connector/
-    │   ├── textual/
-    │   └── visual/
-    └── minigpt4_stage2/
-        ├── connector/
-        ├── textual/
-        └── visual/
+├── checkpoints/
+├── hugging_cache/
+└── hparams/
 ```
 
-#### Stage 2: Knowledge Connector (KC)
+For the MemEIC LLaVA evaluation used in this repository, the active stage 2 adapter path is:
 
-The Knowledge Connector is an attention-based LoRA (`q_proj`, `k_proj`) that bridges visual and textual knowledge.
-
-**Option 1: Download pre-trained adapters**
-
-Download the pre-trained Stage 2 adapters from HuggingFace: [MemEIC/MemEIC-checkpoints](https://huggingface.co/MemEIC/MemEIC-checkpoints)
-
-| Model | Adapter Directory |
-|-------|-------------------|
-| LLaVA-1.5-7B | `llava_stage2/` |
-| MiniGPT-4 | `minigpt4_stage2/` |
-
-Each adapter directory contains `connector/`, `textual/`, and `visual/` sub-folders.
-
-**Option 2: Train from scratch**
-
-```bash
-# LLaVA
-python test_compositional_edit.py train_LLaVA_OURS_stage2
-
-# MiniGPT4
-python test_compositional_edit.py train_MiniGPT4_OURS_stage2
+```text
+checkpoints/llava_stage2
 ```
 
-#### Stage 3: MemEIC Evaluation
+## Evaluation
 
-```bash
-# LLaVA
-python test_compositional_edit.py test_LLaVA_OURS_comp
+## Main Evaluation Script
 
-# MiniGPT4
-python test_compositional_edit.py test_MiniGPT4_OURS_comp
+The main entrypoint is:
+
+```text
+test_compositional_edit.py
 ```
 
-**Editing/Training Details:**
-- Edit -> Visual/Textual LoRA: FFN layers (`down_proj`, `up_proj`)
-- Training -> Knowledge Connector: Self-attention layers (`q_proj`, `k_proj`)
----
+It supports both default CCKEB evaluation and environment-controlled custom evaluation.
 
-## 🤖 Supported Models
+### Evaluate the Numeric Adversarial Benchmark
 
-| Model        | Status         |
-| ------------ | -------------- |
-| LLaVA-1.5-7B | ✅ Supported    |
-| MiniGPT4     | ✅ Supported    |
-| BLIP2        | 🔧 Experimental |
+PowerShell command:
 
-## 📁 Project Structure
-
+```powershell
+Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_DATASET = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\adversal2k.json"
+$env:MEMEIC_IMAGE_ROOT = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_GPUS = "0"
+$env:MEMEIC_EVAL_GAPS = "0"
+$env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric"
+$env:MEMEIC_TEST_NUM = "1924"
+& "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
 ```
+
+### Faster Evaluation Without Artifact Generation
+
+Artifact generation adds extra work for predictions, reports, visualizations, and failure-case summaries. To run a faster benchmark-only evaluation, disable artifacts:
+
+```powershell
+Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_DATASET = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\adversal2k.json"
+$env:MEMEIC_IMAGE_ROOT = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_GPUS = "0"
+$env:MEMEIC_EVAL_GAPS = "0"
+$env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric_noartifacts"
+$env:MEMEIC_TEST_NUM = "1924"
+$env:MEMEIC_ENABLE_ARTIFACTS = "0"
+& "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
+```
+
+### Small Subset Evaluation
+
+If you want a quicker sanity check, reduce `MEMEIC_TEST_NUM`.
+
+Example for 100 samples:
+
+```powershell
+Set-Location "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_DATASET = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\adversal2k.json"
+$env:MEMEIC_IMAGE_ROOT = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC"
+$env:MEMEIC_EVAL_GPUS = "0"
+$env:MEMEIC_EVAL_GAPS = "0"
+$env:MEMEIC_RESULTS_DIR = "c:\Users\Dr-Prashantkumar\Downloads\Raghava-Personal\downlaod images\MemEIC\results_numeric_fast100"
+$env:MEMEIC_TEST_NUM = "100"
+$env:MEMEIC_ENABLE_ARTIFACTS = "0"
+& "c:/Users/Dr-Prashantkumar/Downloads/Raghava-Personal/downlaod images/.venv/Scripts/python.exe" .\test_compositional_edit.py test_LLaVA_OURS_comp
+```
+
+## What the Evaluation Produces
+
+Depending on settings, MemEIC writes outputs under the results directory you choose. Typical folders include:
+
+```text
+results_numeric/
+├── failure_cases/
+├── metrics/
+├── models/
+├── predictions/
+├── reports/
+└── visualizations/
+```
+
+If `MEMEIC_ENABLE_ARTIFACTS=0`, the run skips the extra artifact pipeline and focuses on benchmark execution and core result files.
+
+## Important Notes for This Repository
+
+- `test_compositional_edit.py` defaults to `CCKEB_eval.json` only when `MEMEIC_EVAL_DATASET` is not set
+- GPU selection is controlled by `MEMEIC_EVAL_GPUS`
+- on a single-GPU machine, MemEIC runs the active model on `cuda:0` and uses CPU for cache-side storage
+- the numeric benchmark is much slower than a standard feed-forward test because it performs sequential edit and evaluation across the benchmark
+
+## Repository Structure
+
+```text
 MemEIC/
-├── datasets/                  # Dataset files
-├── easyeditor/               # Core editing framework
-│   ├── trainer/              # Training modules
-│   │   ├── algs/            # Editing algorithms (FT, LoRA, etc.)
-│   │   ├── llava/           # LLaVA model support
-│   │   ├── blip2_models/    # BLIP2/MiniGPT4 model support
-│   │   └── MultimodalTrainer.py
-│   └── dataset/              # Dataset loaders
-├── hparams/                   # Hyperparameter configs
-│   ├── FT/                   # Fine-tuning configs
-│   ├── LORA/                 # LoRA baseline configs
-│   └── OURS/                 # MemEIC configs
-│       └── stage2/           # Knowledge Connector configs
-├── test_compositional_edit.py # Main evaluation script
-└── README.md
+├── README.md
+├── adversal2k.json
+├── CCKEB_images/
+├── checkpoints/
+├── coco images/
+├── easyeditor/
+├── figs/
+├── hparams/
+├── hugging_cache/
+├── requirements.txt
+└── test_compositional_edit.py
 ```
 
----
+## Citation
 
-## 📜 License
-
-This code & dataset are released under the **BSD-3-Clause**.
-
-The CCKEB dataset is partially derived from the **VLKEB (NeurIPS'24)** dataset, which is licensed under the BSD 3-Clause License. All original copyright notices are preserved.
-
-
-## 🖊️ Citation
-
-If you use this code or dataset, please cite our paper:
-
-```bibtex
-@inproceedings{
-seong2025memeic,
-title={Mem{EIC}: A Step Toward Continual and Compositional Knowledge Editing},
-author={Jin Seong and Jiyun Park and Wencke Liermann and Hongseok Choi and Yoonji Nam and Hyun Kim and Soojong Lim and Namhoon Lee},
-booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-year={2025},
-url={https://openreview.net/forum?id=Qvj8s2rRUs}
-}
-```
-
-## 📧 Contact
-
-For questions, issues, or contributions:
-
-- **GitHub Issues**: Please open an issue on our [GitHub repository](https://github.com/MemEIC/MemEIC/issues)
-- **Email**: Jin Seong (real_castle@etri.re.kr)
-
-## 🔗 Related Works
-
-We encourage citing the foundational works this project builds upon:
-
-- **VLKEB**: [(NeurIPS'24) VLKEB: A Large Vision-Language Model Knowledge Editing Benchmark](https://github.com/VLKEB/VLKEB)
-- **EasyEdit**: [An easy-to-use knowledge editing framework for large language models](https://github.com/zjunlp/EasyEdit)
-
----
-
-## 🙏 Acknowledgements
-
-This project is built upon [EasyEdit](https://github.com/zjunlp/EasyEdit) and [VLKEB](https://github.com/VLKEB/VLKEB). We thank the authors for their excellent work.
+If you use MemEIC, CCKEB, or the numeric adversarial benchmark adaptation in this repository, cite the original MemEIC paper and clearly describe any benchmark modifications you made for numeric evaluation.
